@@ -1,177 +1,189 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
-IMAGE_NAME="uvk5"
+set -eu -o pipefail
+
+DOCKER_IMAGE="uvk5:build"
+DOCKER_PLATFORM="linux/amd64"
 FIRMWARE_DIR="${PWD}/compiled-firmware"
 
-# Create firmware output directory if it doesn't exist
-mkdir -p "$FIRMWARE_DIR"
+# ------------------ BUILD VARIANTS ------------------
 
-# Clean previously compiled firmware files
-rm -f "$FIRMWARE_DIR"/*
+FIRMWARE_CUSTOM=(
+    EDITION_STRING=Custom
+    TARGET=f4hwn.custom
+)
 
-# Clean up old Docker artifacts
-echo "🧽 Cleaning up old Docker artifacts..."
-docker system prune -f --volumes >/dev/null 2>&1 || true
+FIRMWARE_STANDARD=(
+    ENABLE_SPECTRUM=0
+    ENABLE_FMRADIO=0
+    ENABLE_AIRCOPY=0
+    ENABLE_NOAA=0
+    EDITION_STRING=Standard
+    TARGET=f4hwn.standard
+)
 
-# Always rebuild the Docker image to ensure latest code changes
-echo "⚙️ Rebuilding Docker image '$IMAGE_NAME'..."
-docker rmi "$IMAGE_NAME" 2>/dev/null || true
-if ! docker build --build-arg BUILDPLATFORM=linux/amd64 -t "$IMAGE_NAME" .; then
-    echo "❌ Failed to build docker image"
-    exit 1
-fi
+FIRMWARE_BANDSCOPE=(
+    ENABLE_SPECTRUM=1
+    ENABLE_FMRADIO=0
+    ENABLE_VOX=0
+    ENABLE_AIRCOPY=1
+    ENABLE_FEAT_F4HWN_SCREENSHOT=1
+    ENABLE_FEAT_F4HWN_GAME=0
+    ENABLE_FEAT_F4HWN_PMR=1
+    ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1
+    ENABLE_NOAA=0
+    ENABLE_FEAT_F4HWN_RESCUE_OPS=0
+    EDITION_STRING=Bandscope
+    TARGET=f4hwn.bandscope
+)
+
+FIRMWARE_BROADCAST=(
+    ENABLE_SPECTRUM=0
+    ENABLE_FMRADIO=1
+    ENABLE_VOX=1
+    ENABLE_AIRCOPY=1
+    ENABLE_FEAT_F4HWN_SCREENSHOT=1
+    ENABLE_FEAT_F4HWN_GAME=0
+    ENABLE_FEAT_F4HWN_PMR=1
+    ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1
+    ENABLE_NOAA=0
+    ENABLE_FEAT_F4HWN_RESCUE_OPS=0
+    EDITION_STRING=Broadcast
+    TARGET=f4hwn.broadcast
+)
+
+FIRMWARE_BASIC=(
+    ENABLE_SPECTRUM=1
+    ENABLE_FMRADIO=1
+    ENABLE_VOX=0
+    ENABLE_AIRCOPY=0
+    ENABLE_FEAT_F4HWN_GAME=0
+    ENABLE_FEAT_F4HWN_SPECTRUM=0
+    ENABLE_FEAT_F4HWN_PMR=1
+    ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1
+    ENABLE_NOAA=0
+    ENABLE_AUDIO_BAR=0
+    ENABLE_FEAT_F4HWN_RESUME_STATE=0
+    ENABLE_FEAT_F4HWN_CHARGING_C=0
+    ENABLE_FEAT_F4HWN_INV=1
+    ENABLE_FEAT_F4HWN_CTR=0
+    ENABLE_FEAT_F4HWN_NARROWER=1
+    ENABLE_FEAT_F4HWN_RESCUE_OPS=0
+    EDITION_STRING=Basic
+    TARGET=f4hwn.basic
+)
+
+FIRMWARE_RESCUEOPS=(
+    ENABLE_SPECTRUM=0
+    ENABLE_FMRADIO=0
+    ENABLE_VOX=1
+    ENABLE_AIRCOPY=1
+    ENABLE_FEAT_F4HWN_SCREENSHOT=1
+    ENABLE_FEAT_F4HWN_GAME=0
+    ENABLE_FEAT_F4HWN_PMR=1
+    ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1
+    ENABLE_NOAA=1
+    ENABLE_FEAT_F4HWN_RESCUE_OPS=1
+    EDITION_STRING=RescueOps
+    TARGET=f4hwn.rescueops
+)
+
+FIRMWARE_GAME=(
+    ENABLE_SPECTRUM=0
+    ENABLE_FMRADIO=1
+    ENABLE_VOX=0
+    ENABLE_AIRCOPY=1
+    ENABLE_FEAT_F4HWN_GAME=1
+    ENABLE_FEAT_F4HWN_PMR=1
+    ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1
+    ENABLE_NOAA=0
+    ENABLE_FEAT_F4HWN_RESCUE_OPS=0
+    EDITION_STRING=Game
+    TARGET=f4hwn.game
+)
+
+build() {
+    FIRMWARE_MSG="$1"
+    shift
+    FIRMWARE_OPTS=( "$@" )
+
+    DOCKER_BUILD_OPTS=(
+        --platform "$DOCKER_PLATFORM"
+        --tag "$DOCKER_IMAGE"
+        .
+    )
+
+    DOCKER_RUN_OPTS=(
+        --platform "$DOCKER_PLATFORM"
+        --rm
+        --volume "${FIRMWARE_DIR}:/app/compiled-firmware"
+        "$DOCKER_IMAGE"
+    )
+
+    mkdir -p "$FIRMWARE_DIR"
+
+    echo "⚙️ Rebuild Docker image '$DOCKER_IMAGE'..."
+    if ! docker buildx build "${DOCKER_BUILD_OPTS[@]}"
+    then
+        echo "❌  Failed to build docker image"
+        exit 1
+    fi
+
+    echo "$FIRMWARE_MSG"
+    docker run "${DOCKER_RUN_OPTS[@]}" /bin/bash -c "make -s ${FIRMWARE_OPTS[*]} && cp f4hwn* compiled-firmware/"
+}
 
 # -------------------- CLEAN ALL ---------------------
 
 clean() {
-    echo "🧽 Cleaning all"
-    docker rmi uvk5
-    docker buildx prune -f
-    docker buildx history ls | awk 'NR>1 {print $1}' | xargs docker buildx history rm
+    echo "🧽  Cleaning all"
+    docker image rm "$DOCKER_IMAGE" 2>/dev/null || true
+    docker buildx prune --force
+    docker buildx history ls | awk '/uv-k5-firmware-custom/ NR>1 {print $1}' | xargs docker buildx history rm
     make clean
-}
-
-# ------------------ BUILD VARIANTS ------------------
-
-custom() {
-    echo "🔧 Custom compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        rm -f ./compiled-firmware/* && cd /app && make -s \
-        EDITION_STRING=Custom \
-        TARGET=f4hwn.custom \
-        && cp f4hwn.custom* compiled-firmware/"
-}
-
-standard() {
-    echo "📦 Standard compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        rm -f ./compiled-firmware/* && cd /app && make -s \
-        ENABLE_SPECTRUM=0 \
-        ENABLE_FMRADIO=0 \
-        ENABLE_AIRCOPY=0 \
-        ENABLE_NOAA=0 \
-        EDITION_STRING=Standard \
-        TARGET=f4hwn.standard \
-        && cp f4hwn.standard* compiled-firmware/"
-}
-
-bandscope() {
-    echo "📺 Bandscope compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        rm -f ./compiled-firmware/* && cd /app && make -s \
-        ENABLE_SPECTRUM=1 \
-        ENABLE_FMRADIO=0 \
-        ENABLE_VOX=0 \
-        ENABLE_AIRCOPY=1 \
-        ENABLE_FEAT_F4HWN_SCREENSHOT=1 \
-        ENABLE_FEAT_F4HWN_GAME=0 \
-        ENABLE_FEAT_F4HWN_PMR=1 \
-        ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1 \
-        ENABLE_NOAA=0 \
-        ENABLE_FEAT_F4HWN_RESCUE_OPS=0 \
-        EDITION_STRING=Bandscope \
-        TARGET=f4hwn.bandscope \
-        && cp f4hwn.bandscope* compiled-firmware/"
-}
-
-broadcast() {
-    echo "📻 Broadcast compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        cd /app && make -s \
-        ENABLE_SPECTRUM=0 \
-        ENABLE_FMRADIO=1 \
-        ENABLE_VOX=1 \
-        ENABLE_AIRCOPY=1 \
-        ENABLE_FEAT_F4HWN_SCREENSHOT=1 \
-        ENABLE_FEAT_F4HWN_GAME=0 \
-        ENABLE_FEAT_F4HWN_PMR=1 \
-        ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1 \
-        ENABLE_NOAA=0 \
-        ENABLE_FEAT_F4HWN_RESCUE_OPS=0 \
-        EDITION_STRING=Broadcast \
-        TARGET=f4hwn.broadcast \
-        && cp f4hwn.broadcast* compiled-firmware/"
-}
-
-basic() {
-    echo "☘️ Basic compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        cd /app && make -s \
-        ENABLE_SPECTRUM=1 \
-        ENABLE_FMRADIO=1 \
-        ENABLE_VOX=0 \
-        ENABLE_AIRCOPY=0 \
-        ENABLE_FEAT_F4HWN_GAME=0 \
-        ENABLE_FEAT_F4HWN_SPECTRUM=0 \
-        ENABLE_FEAT_F4HWN_PMR=1 \
-        ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1 \
-        ENABLE_NOAA=0 \
-        ENABLE_AUDIO_BAR=0 \
-        ENABLE_FEAT_F4HWN_RESUME_STATE=0 \
-        ENABLE_FEAT_F4HWN_CHARGING_C=0 \
-        ENABLE_FEAT_F4HWN_INV=1 \
-        ENABLE_FEAT_F4HWN_CTR=0 \
-        ENABLE_FEAT_F4HWN_NARROWER=1 \
-        ENABLE_FEAT_F4HWN_RESCUE_OPS=0 \
-        EDITION_STRING=Basic \
-        TARGET=f4hwn.basic \
-        && cp f4hwn.basic* compiled-firmware/"
-}
-
-rescueops() {
-    echo "🚨 RescueOps compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        cd /app && make -s \
-        ENABLE_SPECTRUM=0 \
-        ENABLE_FMRADIO=0 \
-        ENABLE_VOX=1 \
-        ENABLE_AIRCOPY=1 \
-        ENABLE_FEAT_F4HWN_SCREENSHOT=1 \
-        ENABLE_FEAT_F4HWN_GAME=0 \
-        ENABLE_FEAT_F4HWN_PMR=1 \
-        ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1 \
-        ENABLE_NOAA=1 \
-        ENABLE_FEAT_F4HWN_RESCUE_OPS=1 \
-        EDITION_STRING=RescueOps \
-        TARGET=f4hwn.rescueops \
-        && cp f4hwn.rescueops* compiled-firmware/"
-}
-
-game() {
-    echo "🎮 Game compilation..."
-    docker run --rm -v "$FIRMWARE_DIR:/app/compiled-firmware" "$IMAGE_NAME" /bin/bash -c "\
-        cd /app && make -s \
-        ENABLE_SPECTRUM=0 \
-        ENABLE_FMRADIO=1 \
-        ENABLE_VOX=0 \
-        ENABLE_AIRCOPY=1 \
-        ENABLE_FEAT_F4HWN_GAME=1 \
-        ENABLE_FEAT_F4HWN_PMR=1 \
-        ENABLE_FEAT_F4HWN_GMRS_FRS_MURS=1 \
-        ENABLE_NOAA=0 \
-        ENABLE_FEAT_F4HWN_RESCUE_OPS=0 \
-        EDITION_STRING=Game \
-        TARGET=f4hwn.game \
-        && cp f4hwn.game* compiled-firmware/"
+    rm -rf "$FIRMWARE_DIR"
 }
 
 # ------------------ MENU ------------------
 
-case "$1" in
-    clean) clean ;;
-    custom) custom ;;
-    standard) standard ;;
-    bandscope) bandscope ;;
-    broadcast) broadcast ;;
-    basic) basic ;;
-    rescueops) rescueops ;;
-    game) game ;;
+case "${1:-}" in
+    clean)
+        clean
+        ;;
+    custom)
+        build "🔧  Custom compilation..." \
+            "${FIRMWARE_CUSTOM[@]}"
+        ;;
+    standard)
+        build "📦  Standard compilation..." \
+            "${FIRMWARE_STANDARD[@]}"
+        ;;
+    bandscope)
+        build "📺  Bandscope compilation..." \
+            "${FIRMWARE_BANDSCOPE[@]}"
+        ;;
+    broadcast)
+        build "📻  Broadcast compilation..." \
+            "${FIRMWARE_BROADCAST[@]}"
+        ;;
+    basic)
+        build "☘️ Basic compilation..." \
+            "${FIRMWARE_BASIC[@]}"
+        ;;
+    rescueops)
+        build "🚨  RescueOps compilation..." \
+            "${FIRMWARE_RESCUEOPS[@]}"
+        ;;
+    game)
+        build "🎮  Game compilation..." \
+            "${FIRMWARE_GAME[@]}"
+        ;;
     all)
-        bandscope
-        broadcast
-        basic
-        rescueops
-        game
+        $0 bandscope
+        $0 broadcast
+        $0 basic
+        $0 rescueops
+        $0 game
         ;;
     *)
         echo "Usage: $0 {clean|custom|standard|bandscope|broadcast|basic|rescueops|game|all}"
