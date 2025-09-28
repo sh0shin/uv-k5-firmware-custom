@@ -1,4 +1,4 @@
-FROM docker.io/library/alpine:3.22
+FROM docker.io/library/alpine:3.21
 
 # hadolint ignore=DL3018
 RUN \
